@@ -1,0 +1,75 @@
+name: Ultra PDF Compress
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_kb:
+        description: "Minimum KB to save per PDF"
+        default: "150"
+
+permissions:
+  contents: write
+
+jobs:
+  compress:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Ghostscript
+        run: sudo apt-get update && sudo apt-get install -y ghostscript
+
+      - name: Smart compress
+        env:
+          TARGET: ${{ github.event.inputs.target_kb }}
+        run: |
+          mkdir -p compressed
+          need=$(( TARGET * 1024 ))
+
+          for f in *.pdf; do
+            [ -f "$f" ] || continue
+            orig=$(stat -c%s "$f")
+            best="$f"; bestsize=$orig
+
+            # preset | image DPI | JPEG QFactor (higher = smaller file)
+            for lvl in "ebook 150 0.5" "ebook 110 0.9" "screen 80 1.3" "screen 60 1.8" "screen 40 2.4"; do
+              set -- $lvl
+              gs -sDEVICE=pdfwrite -dCompatibilityLevel=1.5 \
+                -dPDFSETTINGS=/$1 \
+                -dDownsampleColorImages=true -dDownsampleGrayImages=true -dDownsampleMonoImages=true \
+                -dColorImageResolution=$2 -dGrayImageResolution=$2 -dMonoImageResolution=$(( $2 * 2 )) \
+                -dColorImageDownsampleType=/Bicubic -dGrayImageDownsampleType=/Bicubic \
+                -dAutoFilterColorImages=false -dAutoFilterGrayImages=false \
+                -dColorImageFilter=/DCTEncode -dGrayImageFilter=/DCTEncode \
+                -dDetectDuplicateImages=true -dCompressFonts=true -dSubsetFonts=true \
+                -dNOPAUSE -dQUIET -dBATCH \
+                -sOutputFile=tmp.pdf \
+                -c "<< /ColorImageDict << /QFactor $3 /Blend 1 /HSamples [2 1 1 2] /VSamples [2 1 1 2] >> /GrayImageDict << /QFactor $3 /Blend 1 /HSamples [2 1 1 2] /VSamples [2 1 1 2] >> >> setdistillerparams" \
+                -f "$f" || continue
+
+              size=$(stat -c%s tmp.pdf)
+              echo "$f | $1 ${2}dpi q$3 -> $((size/1024)) KB"
+              if [ "$size" -lt "$bestsize" ]; then
+                cp tmp.pdf best.pdf; best="best.pdf"; bestsize=$size
+              fi
+              [ $(( orig - bestsize )) -ge "$need" ] && break
+            done
+
+            cp "$best" "compressed/${f%.pdf}-compressed.pdf"
+            echo "RESULT $f: $((orig/1024)) KB -> $((bestsize/1024)) KB (saved $(( (orig-bestsize)/1024 )) KB)"
+          done
+          rm -f tmp.pdf best.pdf
+
+      - name: Upload compressed PDFs
+        uses: actions/upload-artifact@v4
+        with:
+          name: compressed-pdfs
+          path: compressed/
+
+      - name: Commit compressed PDFs to repo
+        run: |
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add compressed/
+          git commit -m "Add compressed PDFs" || echo "Nothing to commit"
+          git push
